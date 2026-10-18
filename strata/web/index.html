@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Strata</title>
+<link rel="icon" href="icon.svg">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><img src="icon.svg" alt=""><span>Strata</span></div>
+    <div class="side-label">Virtual Machines</div>
+    <nav id="vm-list"></nav>
+    <button class="new-btn" id="new-btn">＋ New Windows PC</button>
+    <div class="side-foot" id="host-info"></div>
+  </aside>
+
+  <main id="main">
+    <div class="center muted">Loading…</div>
+  </main>
+</div>
+
+<template id="tpl-new">
+  <section class="page narrow">
+    <h1>New Windows PC</h1>
+    <p class="lead">Strata downloads Windows 11 Pro for Arm straight from Microsoft and installs it for you. No clicks needed; it takes about 20–40 minutes the first time.</p>
+    <form id="new-form" class="card form">
+      <label>Name <input name="name" value="windows" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,31}" required></label>
+      <label>Processor cores <span class="val" data-for="cpus"></span>
+        <input type="range" name="cpus" min="2" step="1"></label>
+      <label>Memory <span class="val" data-for="memory_gb"></span>
+        <input type="range" name="memory_gb" min="4" step="1"></label>
+      <label>Disk size
+        <select name="disk_gb"><option value="64" selected>64 GB</option><option value="96">96 GB</option>
+          <option value="128">128 GB</option><option value="256">256 GB</option></select>
+        <small>Only the space Windows actually uses is taken from your Mac.</small></label>
+      <label>Shared folder <small>Appears in Windows as drive Z:</small>
+        <div class="row"><input name="share" placeholder="None" readonly><button type="button" class="btn" id="pick-share">Choose…</button>
+          <button type="button" class="btn ghost" id="clear-share">Clear</button></div></label>
+      <div class="two">
+        <label>Windows user name <input name="username" value="User" required></label>
+        <label>Password <input name="password" type="password" placeholder="(none)"></label>
+      </div>
+      <div class="actions"><button class="btn primary big" type="submit">Create &amp; Start</button></div>
+      <p class="fineprint">Windows runs unactivated until you add your own license key in Windows Settings. Unactivated Windows works but shows a watermark and limits personalization.</p>
+    </form>
+  </section>
+</template>
+
+<template id="tpl-vm">
+  <section class="page">
+    <header class="vm-head">
+      <div class="vm-icon"><svg viewBox="0 0 24 24"><path d="M3 5.5 10 4.5v7H3zM11 4.4 21 3v8.5H11zM3 12.5h7v7l-7-1zM11 12.5h10V21l-10-1.4z"/></svg></div>
+      <div class="vm-title"><h1 data-f="name"></h1><span class="pill" data-f="state"></span></div>
+      <div class="vm-actions" data-f="actions"></div>
+    </header>
+    <div class="note" data-f="note" hidden></div>
+    <div class="tabs">
+      <button data-tab="overview" class="active">Overview</button>
+      <button data-tab="terminal">Terminal</button>
+      <button data-tab="snapshots">Snapshots</button>
+      <button data-tab="settings">Settings</button>
+    </div>
+    <div class="tab" data-pane="overview">
+      <div class="grid">
+        <div class="card stat"><div class="k">Processor</div><div class="v" data-f="cpus"></div></div>
+        <div class="card stat"><div class="k">Memory</div><div class="v" data-f="mem"></div></div>
+        <div class="card stat"><div class="k">Disk used</div><div class="v" data-f="disk"></div></div>
+        <div class="card stat"><div class="k">Shared folder</div><div class="v small" data-f="share"></div></div>
+      </div>
+      <div class="card">
+        <h3>Quick actions</h3>
+        <div class="quick">
+          <button class="btn" data-act="rdp" data-needs="running">🖥 Open in Windows App <small>sharp &amp; resizable</small></button>
+          <button class="btn" data-act="open-explorer" data-needs="running">📁 File Explorer</button>
+          <button class="btn" data-act="open-share" data-needs="running">🔗 Shared folder (Z:)</button>
+          <button class="btn" data-act="reveal">🔍 Show VM files on Mac</button>
+        </div>
+        <form class="row open-form" data-needs-form="running">
+          <input name="target" placeholder="Open an app, file or website in Windows… e.g. notepad, calc, https://bing.com">
+          <button class="btn primary">Open</button>
+        </form>
+      </div>
+      <div class="card features">
+        <div>📋 <b>Clipboard</b> <span data-f="clip"></span></div>
+        <div>🧭 <b>Windows helper</b> <span data-f="agent"></span></div>
+        <div>🖼 <b>Display</b> <span data-f="display"></span></div>
+      </div>
+    </div>
+    <div class="tab" data-pane="terminal" hidden>
+      <div class="term card">
+        <div class="term-bar">
+          <div class="seg"><button data-shell="cmd" class="active">Command Prompt</button><button data-shell="powershell">PowerShell</button></div>
+          <button class="btn ghost small" data-act="term-clear">Clear</button>
+        </div>
+        <pre class="term-out" data-f="term-out"></pre>
+        <form class="term-in"><span class="prompt" data-f="prompt">C:\&gt;</span><input name="cmd" autocomplete="off" spellcheck="false" placeholder="Type a Windows command, e.g. ipconfig, dir, winget search vscode"></form>
+      </div>
+      <p class="fineprint">Tip: you can do the same from the Mac's Terminal with <code>strata run <span data-f="name2"></span> ipconfig</code> or <code>strata shell</code>.</p>
+    </div>
+    <div class="tab" data-pane="snapshots" hidden>
+      <div class="card">
+        <h3>Snapshots</h3>
+        <p class="muted">A snapshot saves this PC exactly as it is now. Restore it later to undo anything, like a bad update or app install. Snapshots taken while running include open apps.</p>
+        <form class="row snap-form"><input name="tag" placeholder="Name, e.g. before-update" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,40}" required><button class="btn primary">Take snapshot</button></form>
+        <div class="snap-list" data-f="snaps"></div>
+      </div>
+    </div>
+    <div class="tab" data-pane="settings" hidden>
+      <form class="card form settings-form">
+        <label>Processor cores <span class="val" data-for="cpus"></span><input type="range" name="cpus" min="1" step="1"></label>
+        <label>Memory <span class="val" data-for="memory_gb"></span><input type="range" name="memory_gb" min="2" step="1"></label>
+        <label>Shared folder <small>Appears in Windows as drive Z:</small>
+          <div class="row"><input name="share" placeholder="None" readonly><button type="button" class="btn" data-act="pick">Choose…</button><button type="button" class="btn ghost" data-act="unshare">Clear</button></div></label>
+        <label class="check"><input type="checkbox" name="clipboard"> Share clipboard between Mac and Windows</label>
+        <label class="check"><input type="checkbox" name="hd"> High-resolution display <small>(uses the virtio graphics driver; if the screen stays black, turn this off)</small></label>
+        <div class="actions"><button class="btn primary">Save</button></div>
+      </form>
+      <div class="card danger">
+        <h3>Delete this PC</h3>
+        <p class="muted">Removes Windows and every file inside it. This can't be undone.</p>
+        <button class="btn red" data-act="delete">Delete…</button>
+      </div>
+    </div>
+  </section>
+</template>
+
+<div id="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
