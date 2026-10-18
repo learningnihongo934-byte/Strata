@@ -13,8 +13,8 @@ echo "Checking the dashboard script..."
 if command -v node >/dev/null; then node --check strata/web/app.js; fi
 echo "Smoke test..."
 STRATA_HOME="$(mktemp -d)" ./bin/strata --version
-STRATA_HOME="$(mktemp -d)" ./bin/strata list >/dev/null
+STRATA_HOME="$(mktemp -d)" ./bin/strata games >/dev/null
 
 mkdir -p dist
-tar --exclude='__pycache__' -czf "dist/strata-$VERSION.tar.gz" bin strata guest install.sh README.md LICENSE.md
+tar --exclude="__pycache__" -czf "dist/strata-$VERSION.tar.gz" bin strata install.sh README.md LICENSE.md
 echo "Built dist/strata-$VERSION.tar.gz"

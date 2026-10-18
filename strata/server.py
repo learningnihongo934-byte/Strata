@@ -3,25 +3,25 @@
 import json
 import os
 import secrets
-import shutil
 import subprocess
 import sys
 import threading
 import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import unquote, urlparse
 
-from . import core, runtime, windows
+from . import core, engine, games
 from .core import StrataError
 
 PORT = int(os.environ.get("STRATA_PORT", "7650"))
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 TOKEN_FILE = os.path.join(core.HOME, "dashboard.token")
-JOBS = {}  # name -> {"stage", "done", "total", "error"}
-JOBS_LOCK = threading.Lock()
 TYPES = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
-         ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml"}
+         ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg"}
+JOBS = {}  # key -> {"label", "stage", "done", "total", "error"}
+LOCK = threading.Lock()
+TOKEN = None
 
 
 def dashboard_token():
@@ -34,163 +34,104 @@ def dashboard_token():
         return f.read().strip()
 
 
-# ---------------------------------------------------------------- state
-
-def vm_state(name):
-    c = core.load(name)
-    running = core.is_running(name)
-    st = core.runtime_status(name)
-    if not running:
-        state = "stopped"
-    elif st.get("agent"):
-        state = "running"
-    elif not c.get("installed"):
-        state = "installing"
-    else:
-        state = "starting"
-    return {
-        "name": name, "state": state, "installed": c.get("installed", False),
-        "cpus": c["cpus"], "memory_gb": c["memory_gb"], "disk_gb": c["disk_gb"],
-        "disk_used": core.disk_usage_bytes(name), "share": c.get("share"),
-        "share_mapped": st.get("share", False), "display": c.get("display", "basic"),
-        "clipboard": c.get("clipboard", True), "username": c["username"], "created": c.get("created"),
-    }
-
-
-def full_state():
-    with JOBS_LOCK:
-        jobs = {k: dict(v) for k, v in JOBS.items()}
-    vms = []
-    for n in core.list_names():
-        try:
-            vms.append(vm_state(n))
-        except Exception:
-            pass
-    return {
-        "version": core.VERSION,
-        "vms": vms,
-        "jobs": jobs,
-        "host": {"cpus": core.host_cpus(), "memory_gb": core.host_memory_gb(),
-                 "free_disk": shutil.disk_usage(os.path.expanduser("~")).free,
-                 "default_cpus": core.default_cpus(), "default_memory_gb": core.default_memory_gb()},
-        "doctor": [{"check": c, "ok": ok, "hint": h} for c, ok, h in core.doctor()],
-        "windows_downloaded": os.path.exists(windows.iso_path()),
-    }
-
-
-def create_job(body):
-    share = body.get("share") or None
-    cfg = core.new_config(body.get("name") or "windows", body.get("cpus"), body.get("memory_gb"),
-                          body.get("disk_gb") or 64, share, body.get("username") or "User", body.get("password") or "")
-    if cfg["name"] in JOBS:
-        raise StrataError("That VM is already being created.")
+def start_job(key, label, fn):
+    with LOCK:
+        if key in JOBS and not JOBS[key].get("error"):
+            raise StrataError(f"{label} is already in progress.")
+        JOBS[key] = {"label": label, "stage": "Starting", "done": 0, "total": 0, "error": None}
 
     def progress(stage, done, total):
-        with JOBS_LOCK:
-            JOBS[cfg["name"]].update(stage=stage, done=done, total=total)
+        with LOCK:
+            JOBS[key].update(stage=stage, done=done, total=total)
 
     def work():
         try:
-            windows.create_vm(cfg, progress)
-            if body.get("start", True):
-                runtime.start(cfg["name"])
-            with JOBS_LOCK:
-                JOBS.pop(cfg["name"], None)
+            fn(progress)
+            with LOCK:
+                JOBS.pop(key, None)
         except Exception as e:
-            with JOBS_LOCK:
-                JOBS[cfg["name"]].update(error=str(e))
+            with LOCK:
+                JOBS[key]["error"] = str(e)
 
-    with JOBS_LOCK:
-        JOBS[cfg["name"]] = {"stage": "Starting", "done": 0, "total": 0, "error": None}
     threading.Thread(target=work, daemon=True).start()
-    return {"ok": True, "name": cfg["name"]}
+    return {"ok": True}
 
 
-def pick_folder():
-    r = subprocess.run(["osascript", "-e",
-                        'POSIX path of (choose folder with prompt "Choose a Mac folder to share with Windows")'],
-                       capture_output=True, text=True)
-    return {"path": r.stdout.strip().rstrip("/") or None}
+def state():
+    ready = engine.installed()
+    lib = games.library() if ready else []
+    for g in lib:
+        g["cover"] = (f"/cover/{g['id']}" if games.cover_path(g) else games.cover_url(g))
+    with LOCK:
+        jobs = {k: dict(v) for k, v in JOBS.items()}
+    return {
+        "version": core.VERSION, "ready": ready, "jobs": jobs, "games": lib,
+        "stores": [{"key": k, "name": s["name"], "about": s["about"],
+                    "installed": ready and games.store_installed(k)} for k, s in games.STORES.items()],
+        "settings": {k: {"label": v["label"], "help": v["help"]} for k, v in engine.SETTINGS.items()},
+        "doctor": [{"check": c, "ok": ok, "hint": h} for c, ok, h in core.doctor()],
+        "mac": {"chip": core.chip_name(), "memory_gb": core.memory_gb()},
+    }
 
 
-def settings(name, body):
-    changes = {}
-    if "cpus" in body:
-        changes["cpus"] = max(1, min(int(body["cpus"]), core.host_cpus() + 4))
-    if "memory_gb" in body:
-        m = int(body["memory_gb"])
-        if m < 2 or m >= core.host_memory_gb():
-            raise StrataError(f"Memory must be between 2 and {core.host_memory_gb() - 1} GB.")
-        changes["memory_gb"] = m
-    if "share" in body:
-        s = body["share"] or None
-        if s and not os.path.isdir(s):
-            raise StrataError("That folder doesn't exist.")
-        changes["share"] = s
-    if body.get("display") in ("basic", "hd"):
-        changes["display"] = body["display"]
-    if "clipboard" in body:
-        changes["clipboard"] = bool(body["clipboard"])
-    core.update(name, **changes)
-    return {"ok": True, "restart_needed": core.is_running(name) and bool(set(changes) - {"clipboard"})}
+def pick_file(kind):
+    prompt = "Choose the game's .exe file" if kind == "game" else "Choose a Windows program or installer"
+    start = os.path.join(core.BOTTLE, "drive_c") if kind == "game" else os.path.expanduser("~/Downloads")
+    r = subprocess.run(["osascript", "-e", f'POSIX path of (choose file with prompt "{prompt}" '
+                        f'default location (POSIX file "{start}"))'], capture_output=True, text=True)
+    return r.stdout.strip() or None
 
 
 def route(method, parts, body):
-    """parts: the path split on '/', after 'api'. Returns a JSON-able object."""
     if method == "GET" and parts == ["state"]:
-        return full_state()
-    if method == "POST" and parts == ["vms"]:
-        return create_job(body)
-    if method == "POST" and parts == ["pick-folder"]:
-        return pick_folder()
+        return state()
+    if method == "POST" and parts == ["setup"]:
+        return start_job("setup", "Setting up Strata", engine.install)
+    if method == "POST" and len(parts) == 3 and parts[0] == "stores":
+        key, action = parts[1], parts[2]
+        if key not in games.STORES:
+            raise StrataError("Unknown store.")
+        if action == "install":
+            return start_job(key, f"Installing {games.STORES[key]['name']}", lambda p: games.install_store(key, p))
+        if action == "open":
+            games.open_store(key)
+            return {"ok": True}
     if method == "POST" and len(parts) == 3 and parts[0] == "jobs" and parts[2] == "dismiss":
-        with JOBS_LOCK:
+        with LOCK:
             JOBS.pop(parts[1], None)
         return {"ok": True}
-    if len(parts) >= 3 and parts[0] == "vms":
-        name, action = parts[1], parts[2]
-        core.load(name)
-        if method == "POST" and action == "start":
-            runtime.start(name, bool(body.get("headless")))
-            return {"ok": True}
-        if method == "POST" and action == "stop":
-            threading.Thread(target=core.stop, args=(name, bool(body.get("force"))), daemon=True).start()
-            return {"ok": True}
-        if method == "POST" and action == "delete":
-            core.delete_vm(name)
-            return {"ok": True}
-        if method == "POST" and action == "run":
-            return runtime.run_command(name, body.get("cmd", ""), body.get("shell", "cmd"), body.get("cwd"),
-                                       int(body.get("timeout") or 120))
-        if method == "POST" and action == "open":
-            return runtime.open_in_windows(name, body.get("target", ""))
-        if method == "POST" and action == "rdp":
-            from .cli import write_rdp_file
-            subprocess.run(["open", write_rdp_file(name)])
-            return {"ok": True}
-        if method == "POST" and action == "reveal":
-            subprocess.run(["open", core.vm_dir(name)])
+    if method == "POST" and parts == ["add"]:
+        path = body.get("path") or pick_file("game")
+        return {"id": games.add_game(path, body.get("name"))} if path else {"cancelled": True}
+    if method == "POST" and parts == ["run"]:
+        path = pick_file("installer")
+        if path:
+            games.run_exe(path)
+        return {"ok": bool(path)}
+    if method == "POST" and parts == ["stop"]:
+        engine.stop_all()
+        return {"ok": True}
+    if method == "POST" and parts == ["open-folder"]:
+        subprocess.run(["open", os.path.join(core.BOTTLE, "drive_c")])
+        return {"ok": True}
+    if len(parts) == 3 and parts[0] == "games":
+        g = games.find(parts[1])
+        action = parts[2]
+        if method == "POST" and action == "play":
+            games.play(g)
             return {"ok": True}
         if method == "POST" and action == "settings":
-            return settings(name, body)
-        if action == "snapshots":
-            if method == "GET":
-                return {"snapshots": core.snapshot(name, "list")}
-            if method == "POST" and len(parts) == 3:
-                core.snapshot(name, "save", body.get("tag"))
-                return {"ok": True}
-            if method == "POST" and len(parts) == 5 and parts[4] == "restore":
-                core.snapshot(name, "restore", parts[3])
-                return {"ok": True}
-            if method == "DELETE" and len(parts) == 4:
-                core.snapshot(name, "delete", parts[3])
-                return {"ok": True}
+            return {"settings": games.set_settings(g["id"], body)}
+        if method == "POST" and action == "dock":
+            games.make_dock_app(g)
+            return {"ok": True}
+        if method == "POST" and action == "remove":
+            games.remove_game(g["id"])
+            return {"ok": True}
     raise StrataError("Unknown request.")
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "Strata"
-
     def log_message(self, *args):
         pass
 
@@ -204,12 +145,9 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _host_ok(self):
-        # Blocks DNS-rebinding: only accept requests addressed to our own loopback origin.
-        return self.headers.get("Host", "") in (f"127.0.0.1:{PORT}", f"localhost:{PORT}")
-
     def _handle(self, method):
-        if not self._host_ok():
+        # Only our own loopback origin (blocks DNS rebinding).
+        if self.headers.get("Host", "") not in (f"127.0.0.1:{PORT}", f"localhost:{PORT}"):
             return self._send(403, {"error": "forbidden"})
         url = urlparse(self.path)
         if url.path.startswith("/api/"):
@@ -219,7 +157,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True})
             length = int(self.headers.get("Content-Length") or 0)
             try:
-                body = json.loads(self.rfile.read(length) or b"{}") if length else {}
+                body = json.loads(self.rfile.read(length)) if length else {}
                 parts = [unquote(p) for p in url.path[5:].split("/") if p]
                 return self._send(200, route(method, parts, body))
             except StrataError as e:
@@ -228,6 +166,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(500, {"error": f"Unexpected error: {e}"})
         if method != "GET":
             return self._send(405, {"error": "method not allowed"})
+        if url.path.startswith("/cover/"):
+            try:
+                path = games.cover_path(games.find(unquote(url.path[7:])))
+            except StrataError:
+                path = None
+            if not path:
+                return self._send(404, {"error": "no cover"})
+            with open(path, "rb") as f:
+                return self._send(200, f.read(), "image/jpeg")
         rel = "index.html" if url.path in ("/", "") else url.path.lstrip("/")
         path = os.path.realpath(os.path.join(WEB_DIR, rel))
         if not path.startswith(WEB_DIR + os.sep) or not os.path.isfile(path):
@@ -241,12 +188,6 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self._handle("POST")
 
-    def do_DELETE(self):
-        self._handle("DELETE")
-
-
-TOKEN = None
-
 
 def serve():
     global TOKEN
@@ -258,8 +199,7 @@ def serve():
 
 def _alive():
     try:
-        req = urllib.request.Request(f"http://127.0.0.1:{PORT}/api/ping",
-                                     headers={"X-Strata-Token": dashboard_token()})
+        req = urllib.request.Request(f"http://127.0.0.1:{PORT}/api/ping", headers={"X-Strata-Token": dashboard_token()})
         with urllib.request.urlopen(req, timeout=1) as r:
             return r.status == 200
     except Exception:
@@ -271,15 +211,14 @@ def open_dashboard(foreground=False):
         return serve()
     if not _alive():
         log = open(os.path.join(core.HOME, "dashboard.log"), "ab")
-        subprocess.Popen([sys.executable, "-m", "strata", "dashboard", "--foreground"],
-                         cwd=runtime.PKG_ROOT, env=dict(os.environ, PYTHONPATH=runtime.PKG_ROOT),
-                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+        subprocess.Popen([sys.executable, "-m", "strata", "dashboard", "--foreground"], cwd=core.PKG_ROOT,
+                         env=dict(os.environ, PYTHONPATH=core.PKG_ROOT), stdin=subprocess.DEVNULL,
+                         stdout=log, stderr=log, start_new_session=True)
         for _ in range(50):
             if _alive():
                 break
             time.sleep(0.1)
         else:
             raise StrataError(f"The dashboard didn't start. See {os.path.join(core.HOME, 'dashboard.log')}")
-    url = f"http://127.0.0.1:{PORT}/#t={dashboard_token()}"
-    subprocess.run(["open", url])
+    subprocess.run(["open", f"http://127.0.0.1:{PORT}/#t={dashboard_token()}"])
     print(f"Dashboard: http://127.0.0.1:{PORT}  (opened in your browser)")
