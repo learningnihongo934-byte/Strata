@@ -1,1 +1,1 @@
-"""Strata: run Windows 11 on your Mac, for free."""
+"""Strata: play Windows games on your Mac, for free."""
