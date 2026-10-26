@@ -75,3 +75,7 @@ git clone https://github.com/learningnihongo934-byte/Strata.git && cd Strata
 **Free to use; copying, redistributing or selling it is not allowed without the author's permission.** See [LICENSE.md](LICENSE.md).
 
 Strata downloads, and does not include, the Game Porting Toolkit. Its D3DMetal component is © Apple and subject to Apple's license, which allows non-commercial use only. Wine is LGPL. Strata is not affiliated with Apple, Valve, Epic Games, GOG or Parallels.
+
+---
+
+Made by **Virat Reddy Kaukuntla** ([@learningnihongo934-byte](https://github.com/learningnihongo934-byte))
